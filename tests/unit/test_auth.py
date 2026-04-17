@@ -6,21 +6,23 @@ import time
 import pytest
 from unittest.mock import patch, AsyncMock
 
-from app.models.response import AnalysisResult, EvidenceItem
+from app.models.response import AnalysisResult, EvidenceItem, SourceBreakdown
 
 
 # Minimal valid AnalysisResult for mocking the pipeline
 _MOCK_RESULT = AnalysisResult(
     argument="Coffee reduces liver cancer risk.",
     argument_en="Coffee reduces liver cancer risk.",
-    reliability_score=0.7,
-    consensus_ratio=None,
-    consensus_label="Insufficient data",
+    estimated_reliability=0.7,
+    reliability_basis="AI estimate based on 0 sources (0 full text, 0 abstract only). Not a verified fact-check.",
+    evidence_balance_ratio=None,
+    evidence_balance_label="Insufficient sources found",
     pros=[],
     cons=[],
-    sources_count=0,
+    sources=SourceBreakdown(total=0, academic=0, statistical=0, news=0, fact_check=0, full_text=0, abstract_only=0),
     support_sources=0,
     refutation_sources=0,
+    used_adversarial_queries=False,
 )
 
 _VALID_PAYLOAD = {"argument": "Coffee reduces liver cancer risk."}
