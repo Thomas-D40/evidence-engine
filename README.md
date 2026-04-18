@@ -2,6 +2,22 @@
 
 A standalone FastAPI service for fact-checking individual arguments via a multi-source adversarial research pipeline. Extracted from [video-analyzer-workflow](https://github.com/Thomas-D40/video-analyzer-workflow) as an independently deployable REST API.
 
+## Design Philosophy — Honesty First
+
+Evidence Engine is built around one core principle: **never imply more certainty than the evidence supports**.
+
+This shapes every layer of the system:
+
+- **Field names signal intent** — `estimated_reliability` (not `reliability_score`) and `evidence_balance_label` (not `consensus_label`) make it explicit that outputs are AI estimates over retrieved sources, not scientific measurements or peer-reviewed verdicts.
+- **`reliability_basis` is always visible** — every response includes a plain-text string stating how many sources were used, how many were full text vs. abstract, and the disclaimer *"Not a verified fact-check."*
+- **Source transparency** — each evidence item carries `source_type` (`academic`, `news`, `fact_check`, `statistical`) and `content_depth` (`full_text`, `abstract`, `snippet`) so consumers know the quality of the underlying material.
+- **Source breakdown** — `sources` is a typed object breaking down counts by category and content depth, replacing an opaque integer count.
+- **Adversarial quality gate** — refutation queries that are too similar to support queries (surface negations) are discarded before research. A poor adversarial query is worse than none — it pollutes the refutation pool with sources that support the claim rather than challenge it.
+- **Framing bias prevention** — retrieval intent (`retrieved_for`) is stripped from sources before any LLM call, so the model cannot be anchored by whether a source was fetched to support or refute the argument.
+- **No symmetric capping** — sources are never artificially balanced between pro and con. If evidence clearly leans one way, that is what the response reflects.
+
+---
+
 ## Quick Start
 
 ```bash
@@ -34,7 +50,7 @@ evidence-engine/
 ├── app/
 │   ├── api.py                  # FastAPI app, routes, middleware
 │   ├── config.py               # Settings via pydantic-settings
-│   ├── pipeline.py             # analyze_argument() — 11-step orchestrator
+│   ├── pipeline.py             # analyze_argument() — 13-step orchestrator
 │   ├── core/
 │   │   ├── auth.py             # API key validation + brute-force IP blocking
 │   │   ├── rate_limiter.py     # slowapi — per-IP and per-key limits
@@ -42,9 +58,9 @@ evidence-engine/
 │   ├── agents/
 │   │   ├── orchestration/     # Topic classification, query generation (support + adversarial)
 │   │   ├── enrichment/        # Relevance screening, full-text fetching
-│   │   └── analysis/          # Pros/cons extraction, reliability scoring, consensus
+│   │   └── analysis/          # Pros/cons extraction, reliability scoring, evidence balance
 │   ├── services/research/     # External API clients (no LLM)
-│   ├── models/                # AnalyzeRequest, AnalysisResult (Pydantic)
+│   ├── models/                # AnalyzeRequest, AnalysisResult, SourceBreakdown (Pydantic)
 │   ├── constants/             # All constants organized by domain
 │   ├── prompts/               # Reusable LLM prompt components
 │   └── utils/                 # api_helpers, relevance_filter
@@ -59,30 +75,34 @@ evidence-engine/
 
 ## Pipeline
 
-`POST /analyze` runs 11 steps for each argument:
+`POST /analyze` runs 13 steps for each argument:
 
 ```
-1. Topic classification      → select research services (e.g. pubmed, arxiv, oecd)
+1. Topic classification        → select research services (e.g. pubmed, arxiv, oecd)
        ↓
-2. Query generation          → support queries  +  refutation queries  (parallel, LLM)
+2. Query generation            → support queries  +  adversarial queries  (parallel, LLM)
        ↓
-3. Dual research             → both query sets executed against all services (concurrent)
+3. Adversarial quality gate    → discard refutation queries too similar to support queries
        ↓
-4. Tag sources               → each source stamped retrieved_for = "support" | "refutation"
+4. Dual research               → both query sets executed against all services (concurrent)
        ↓
-5. Relevance filtering       → keyword-based pre-filter (no LLM)
+5. Tag sources                 → each source stamped retrieved_for = "support" | "refutation"
        ↓
-6. Screening                 → LLM batch-scores abstracts, selects top-N for full-text
+6. Relevance filtering         → keyword-based pre-filter (no LLM)
        ↓
-7. Full-text fetch           → async concurrent HTTP fetch (medium / hard modes only)
+7. Screening                   → LLM batch-scores abstracts, selects top-N for full-text
        ↓
-8. Strip retrieved_for tag   → prevents framing bias before LLM sees sources
+8. Full-text fetch             → async concurrent HTTP fetch (medium / hard modes only)
        ↓
-9. Pros / cons extraction    → LLM identifies supporting and contradicting evidence
+9. Strip retrieved_for tag     → prevents framing bias before LLM sees sources
        ↓
-10. Reliability aggregation  → LLM scores 0.0–1.0 based on source quality and consensus
+10. Pros / cons extraction     → LLM identifies supporting and contradicting evidence
        ↓
-11. Consensus computation    → pure Python, deterministic, zero LLM
+11. Enrich evidence items      → source_type and content_depth added per EvidenceItem
+       ↓
+12. Reliability aggregation    → LLM estimates 0.0–1.0 based on source quality and balance
+       ↓
+13. Evidence balance           → pure Python, deterministic, zero LLM
 ```
 
 ### Analysis Modes
@@ -97,7 +117,9 @@ evidence-engine/
 
 Two independent query sets are generated for every argument:
 - **Support queries** — find evidence that corroborates the claim
-- **Refutation queries** — find evidence that contradicts or challenges it
+- **Adversarial queries** — find evidence that genuinely challenges it
+
+Adversarial queries are generated via structured two-step reasoning across five angles (confounders, subgroup exceptions, methodological weaknesses, opposing causal mechanisms, null findings), then filtered by a quality gate: any query with more than 60% keyword overlap with the corresponding support query is discarded as a surface negation.
 
 The `retrieved_for` tag is attached to each source for post-processing bookkeeping, then **stripped before passing sources to the LLM** — preventing the model from being anchored by retrieval intent when extracting pros/cons.
 
@@ -155,30 +177,63 @@ Requires `X-API-Key` header.
 {
   "argument": "Coffee reduces liver cancer risk",
   "argument_en": "Coffee reduces liver cancer risk",
-  "reliability_score": 0.74,
-  "consensus_ratio": 0.667,
-  "consensus_label": "Moderate consensus",
+  "estimated_reliability": 0.74,
+  "reliability_basis": "AI estimate based on 8 sources (2 full text, 6 abstract only). Not a verified fact-check.",
+  "evidence_balance_ratio": 0.625,
+  "evidence_balance_label": "More supporting than contradicting evidence found",
   "pros": [
-    { "claim": "Meta-analysis of 9 studies shows 40% risk reduction.", "source": "https://pubmed.ncbi.nlm.nih.gov/..." }
+    {
+      "claim": "Meta-analysis of 9 studies shows 40% risk reduction.",
+      "source": "https://pubmed.ncbi.nlm.nih.gov/...",
+      "source_type": "academic",
+      "content_depth": "abstract"
+    }
   ],
   "cons": [
-    { "claim": "Cohort study found no statistically significant association.", "source": "https://pubmed.ncbi.nlm.nih.gov/..." }
+    {
+      "claim": "Cohort study found no statistically significant association.",
+      "source": "https://pubmed.ncbi.nlm.nih.gov/...",
+      "source_type": "academic",
+      "content_depth": "full_text"
+    }
   ],
-  "sources_count": 8,
+  "sources": {
+    "total": 8,
+    "academic": 6,
+    "statistical": 0,
+    "news": 2,
+    "fact_check": 0,
+    "full_text": 2,
+    "abstract_only": 6
+  },
   "support_sources": 5,
-  "refutation_sources": 3
+  "refutation_sources": 3,
+  "used_adversarial_queries": true
 }
 ```
 
-**Consensus labels**
+**Field reference**
 
-| `consensus_ratio` | `consensus_label` |
-|-------------------|-------------------|
-| ≥ 0.75 | Strong consensus |
-| ≥ 0.55 | Moderate consensus |
-| ≥ 0.35 | Contested |
-| < 0.35 | Minority position |
-| No evidence | Insufficient data |
+| Field | Type | Description |
+|-------|------|-------------|
+| `estimated_reliability` | float 0–1 | LLM estimate — not a verified score |
+| `reliability_basis` | string | How the estimate was formed (source count, depth, disclaimer) |
+| `evidence_balance_ratio` | float 0–1 \| null | pros / (pros + cons); null if no evidence found |
+| `evidence_balance_label` | string | Human-readable summary of the ratio (see table below) |
+| `pros[].source_type` | string | `academic` \| `news` \| `fact_check` \| `statistical` |
+| `pros[].content_depth` | string | `full_text` \| `abstract` \| `snippet` |
+| `sources` | object | Typed breakdown of all sources used |
+| `used_adversarial_queries` | bool | False if all refutation queries were filtered by the quality gate |
+
+**Evidence balance labels**
+
+| `evidence_balance_ratio` | `evidence_balance_label` |
+|--------------------------|--------------------------|
+| ≥ 0.75 | Mostly supporting evidence found |
+| ≥ 0.55 | More supporting than contradicting evidence found |
+| ≥ 0.35 | Mixed evidence found |
+| < 0.35 | Mostly contradicting evidence found |
+| No evidence | Insufficient sources found |
 
 ### `GET /health`
 
@@ -222,7 +277,7 @@ No authentication required. Returns `{"status": "ok"}`.
 ## Testing
 
 ```bash
-# All tests (46) — no live API calls
+# All tests (148) — no live API calls
 pytest tests/ -v
 
 # Unit tests only (pure Python, instant)
