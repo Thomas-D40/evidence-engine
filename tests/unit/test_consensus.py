@@ -33,7 +33,7 @@ def test_all_cons_returns_minority_position():
 
 
 def test_strong_consensus_threshold():
-    # 3 pros, 1 con → ratio = 0.75 → Strong consensus
+    # 3 pros, 1 con → ratio = 0.75 → Mostly supporting
     pros = [{}] * 3
     cons = [{}] * 1
     result = compute_consensus(pros, cons)
@@ -42,7 +42,7 @@ def test_strong_consensus_threshold():
 
 
 def test_moderate_consensus_threshold():
-    # 2 pros, 2 cons → ratio = 0.5 → between 0.35 and 0.55 → Contested
+    # 2 pros, 2 cons → ratio = 0.5 → between 0.35 and 0.55 → Mixed
     pros = [{}] * 2
     cons = [{}] * 2
     result = compute_consensus(pros, cons)
@@ -51,7 +51,7 @@ def test_moderate_consensus_threshold():
 
 
 def test_moderate_consensus_label():
-    # 3 pros, 2 cons → ratio = 0.6 → Moderate consensus
+    # 3 pros, 2 cons → ratio = 0.6 → More supporting than contradicting
     pros = [{}] * 3
     cons = [{}] * 2
     result = compute_consensus(pros, cons)
@@ -65,12 +65,21 @@ def test_ratio_rounded_to_three_decimals():
     assert result["ratio"] == 0.25
 
 
-def test_consensus_ratio_and_label_keys_both_present():
-    """Both key naming conventions are available for compatibility."""
+def test_evidence_balance_keys_present():
+    """Both ratio/label and evidence_balance_ratio/evidence_balance_label keys are available."""
     result = compute_consensus([{}], [{}])
     assert "ratio" in result
     assert "label" in result
-    assert "consensus_ratio" in result
-    assert "consensus_label" in result
-    assert result["ratio"] == result["consensus_ratio"]
-    assert result["label"] == result["consensus_label"]
+    assert "evidence_balance_ratio" in result
+    assert "evidence_balance_label" in result
+    assert result["ratio"] == result["evidence_balance_ratio"]
+    assert result["label"] == result["evidence_balance_label"]
+
+
+def test_label_values_are_descriptive_not_scientific():
+    """Labels describe evidence found, not scientific consensus claims."""
+    assert LABEL_STRONG      == "Mostly supporting evidence found"
+    assert LABEL_MODERATE    == "More supporting than contradicting evidence found"
+    assert LABEL_CONTESTED   == "Mixed evidence found"
+    assert LABEL_MINORITY    == "Mostly contradicting evidence found"
+    assert LABEL_INSUFFICIENT == "Insufficient sources found"

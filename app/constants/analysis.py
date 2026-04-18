@@ -27,3 +27,15 @@ CONSENSUS_MODERATE_THRESHOLD = 0.55
 
 CONSENSUS_CONTESTED_THRESHOLD = 0.35
 """Minimum pros ratio for 'Contested' label. Below this: 'Minority position'."""
+
+# ============================================================================
+# SOURCE TYPE CLASSIFICATION
+# ============================================================================
+
+SOURCE_TYPE_MAP: dict[str, set[str]] = {
+    "academic":    {"pubmed", "semantic_scholar", "arxiv", "crossref", "europepmc", "core", "doaj"},
+    "statistical": {"oecd", "world_bank"},
+    "news":        {"newsapi", "gnews"},
+    "fact_check":  {"google_factcheck", "claimbuster"},
+}
+"""Maps source category to the set of service names belonging to that category."""

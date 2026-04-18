@@ -3,6 +3,7 @@ Adversarial query generation agent.
 
 Generates refutation-oriented search queries for each research service,
 enabling dual retrieval (support + refutation) to reduce structural bias.
+Uses structured reasoning before generation to avoid surface-level negations.
 """
 import json
 import logging
@@ -25,32 +26,45 @@ logger = logging.getLogger(__name__)
 # PROMPTS
 # ============================================================================
 
-SYSTEM_PROMPT = "You are a research query optimizer specialized in finding contradicting evidence."
+SYSTEM_PROMPT = "You are a scientific devil's advocate specialized in finding genuine weaknesses in claims."
 
-USER_PROMPT_TEMPLATE = """For the following argument, generate search queries designed to find
-CONTRADICTING or REFUTING evidence — studies, data, or expert opinions that challenge the claim.
+USER_PROMPT_TEMPLATE = """Argument: "{argument}"
 
-Argument: "{argument}"
-Research services: {agents}
+STEP 1 — Identify genuine weaknesses (reason before generating):
+For each angle below, write one sentence explaining how it applies to this specific argument.
+If an angle does not apply, write "N/A".
 
-For each service, generate a query that would surface evidence AGAINST this argument.
-Use negation, alternative hypotheses, null findings, or opposing terminology.
+  a) Confounders: what alternative factor could explain the same observation?
+  b) Exceptions: in what subgroup, context, or condition might the effect reverse or disappear?
+  c) Methodological weakness: what flaw commonly affects studies on this topic?
+  d) Opposing mechanism: what mechanism contradicts the claim at a causal level?
+  e) Null findings: what would a failed replication or heterogeneous meta-analysis look like?
+
+STEP 2 — Generate one adversarial query per research service.
+Each query MUST emerge from one of the weaknesses identified above (state which: a/b/c/d/e).
+Do NOT simply negate the argument. The query must surface evidence that makes the claim
+less convincing, not evidence that merely mentions it.
+
+Services: {agents}
 
 {json_instruction}
 
 Return JSON with this exact format:
 {{
-  "service_name": {{"adversarial_query": "...", "confidence": 0.0}}
+  "reasoning": {{
+    "a": "...",
+    "b": "...",
+    "c": "...",
+    "d": "...",
+    "e": "..."
+  }},
+  "queries": {{
+    "service_name": {{"adversarial_query": "...", "angle": "c", "confidence": 0.8}}
+  }}
 }}
 
-Example output:
-{{
-  "pubmed": {{"adversarial_query": "coffee cancer risk no association null findings", "confidence": 0.80}},
-  "semantic_scholar": {{"adversarial_query": "coffee consumption cancer no effect systematic review", "confidence": 0.75}}
-}}
-
-Only include services from the provided list. Set confidence 0.0–1.0 based on query quality.
-If a service is irrelevant to the argument, use empty string "" for adversarial_query."""
+Only include services from the provided list.
+Use empty string "" for adversarial_query if the service is irrelevant to this argument."""
 
 # ============================================================================
 # LOGIC
@@ -62,7 +76,8 @@ _adversarial_generator: Optional["AdversarialQueryGenerator"] = None
 class AdversarialQueryGenerator:
     """
     LLM-based generator producing one adversarial query per research service.
-    Focused on surfacing contradicting or refuting evidence.
+    Uses structured two-step reasoning to surface genuine weaknesses rather than
+    surface-level negations.
     """
 
     def __init__(self):
@@ -80,7 +95,7 @@ class AdversarialQueryGenerator:
         max_attempts=QUERY_GENERATOR_MAX_RETRY_ATTEMPTS,
         base_delay=QUERY_GENERATOR_BASE_DELAY
     )
-    def _call_llm(self, argument: str, agents: List[str]) -> Dict[str, Dict]:
+    def _call_llm(self, argument: str, agents: List[str]) -> Dict:
         if not self.available:
             raise TransientAPIError("OpenAI client not available")
 
@@ -126,10 +141,14 @@ class AdversarialQueryGenerator:
         try:
             raw = self._call_llm(argument, agents)
 
-            queries: Dict[str, str] = {}
-            for agent in agents:
-                entry = raw.get(agent, {})
-                queries[agent] = entry.get("adversarial_query", "") if isinstance(entry, dict) else ""
+            # Extract from nested "queries" key — angle/confidence retained in raw for logging
+            raw_queries = raw.get("queries", {})
+            queries: Dict[str, str] = {
+                agent: raw_queries.get(agent, {}).get("adversarial_query", "")
+                if isinstance(raw_queries.get(agent), dict)
+                else ""
+                for agent in agents
+            }
 
             logger.info(
                 "adversarial_queries_generated",

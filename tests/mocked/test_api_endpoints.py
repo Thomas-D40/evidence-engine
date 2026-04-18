@@ -5,7 +5,28 @@ No live API calls — OpenAI and research services are fully mocked.
 import pytest
 from unittest.mock import patch, AsyncMock, MagicMock
 
-from app.models.response import AnalysisResult, EvidenceItem
+from app.models.response import AnalysisResult, EvidenceItem, SourceBreakdown
+
+
+def _make_evidence_item(claim: str, source: str) -> EvidenceItem:
+    return EvidenceItem(
+        claim=claim,
+        source=source,
+        source_type="academic",
+        content_depth="snippet",
+    )
+
+
+def _make_source_breakdown(total: int = 5, support: int = 3, refutation: int = 2) -> SourceBreakdown:
+    return SourceBreakdown(
+        total=total,
+        academic=total,
+        statistical=0,
+        news=0,
+        fact_check=0,
+        full_text=0,
+        abstract_only=total,
+    )
 
 
 # ============================================================================
@@ -47,14 +68,16 @@ class TestAnalyzeAuth:
         mock_result = AnalysisResult(
             argument="Coffee reduces liver cancer risk.",
             argument_en="Coffee reduces liver cancer risk.",
-            reliability_score=0.72,
-            consensus_ratio=0.667,
-            consensus_label="Moderate consensus",
-            pros=[EvidenceItem(claim="Studies show reduced risk.", source="https://pubmed.ncbi.nlm.nih.gov/1")],
-            cons=[EvidenceItem(claim="Cohort study found no effect.", source="https://pubmed.ncbi.nlm.nih.gov/2")],
-            sources_count=5,
+            estimated_reliability=0.72,
+            reliability_basis="AI estimate based on 5 sources (0 full text, 5 abstract only). Not a verified fact-check.",
+            evidence_balance_ratio=0.667,
+            evidence_balance_label="More supporting than contradicting evidence found",
+            pros=[_make_evidence_item("Studies show reduced risk.", "https://pubmed.ncbi.nlm.nih.gov/1")],
+            cons=[_make_evidence_item("Cohort study found no effect.", "https://pubmed.ncbi.nlm.nih.gov/2")],
+            sources=_make_source_breakdown(),
             support_sources=3,
             refutation_sources=2,
+            used_adversarial_queries=True,
         )
 
         with patch("app.api.analyze_argument", new_callable=AsyncMock, return_value=mock_result):
@@ -103,11 +126,15 @@ class TestAnalyzePayload:
         mock_result = AnalysisResult(
             argument="Coffee reduces liver cancer risk.",
             argument_en="Coffee reduces liver cancer risk.",
-            reliability_score=0.5,
-            consensus_ratio=None,
-            consensus_label="Insufficient data",
+            estimated_reliability=0.5,
+            reliability_basis="AI estimate based on 0 sources (0 full text, 0 abstract only). Not a verified fact-check.",
+            evidence_balance_ratio=None,
+            evidence_balance_label="Insufficient sources found",
             pros=[], cons=[],
-            sources_count=0, support_sources=0, refutation_sources=0,
+            sources=SourceBreakdown(total=0, academic=0, statistical=0, news=0, fact_check=0, full_text=0, abstract_only=0),
+            support_sources=0,
+            refutation_sources=0,
+            used_adversarial_queries=False,
         )
         for mode in ["simple", "medium", "hard"]:
             with patch("app.api.analyze_argument", new_callable=AsyncMock, return_value=mock_result):
@@ -136,14 +163,16 @@ class TestAnalyzeResponseShape:
         mock_result = AnalysisResult(
             argument="Coffee reduces liver cancer risk.",
             argument_en="Coffee reduces liver cancer risk.",
-            reliability_score=0.72,
-            consensus_ratio=0.667,
-            consensus_label="Moderate consensus",
-            pros=[EvidenceItem(claim="Evidence.", source="https://example.com")],
+            estimated_reliability=0.72,
+            reliability_basis="AI estimate based on 3 sources (0 full text, 3 abstract only). Not a verified fact-check.",
+            evidence_balance_ratio=0.667,
+            evidence_balance_label="More supporting than contradicting evidence found",
+            pros=[_make_evidence_item("Evidence.", "https://example.com")],
             cons=[],
-            sources_count=3,
+            sources=_make_source_breakdown(total=3, support=2, refutation=1),
             support_sources=2,
             refutation_sources=1,
+            used_adversarial_queries=True,
         )
 
         with patch("app.api.analyze_argument", new_callable=AsyncMock, return_value=mock_result):
@@ -157,13 +186,43 @@ class TestAnalyzeResponseShape:
         data = response.json()
 
         required_fields = [
-            "argument", "argument_en", "reliability_score",
-            "consensus_ratio", "consensus_label",
-            "pros", "cons", "sources_count",
-            "support_sources", "refutation_sources",
+            "argument", "argument_en",
+            "estimated_reliability", "reliability_basis",
+            "evidence_balance_ratio", "evidence_balance_label",
+            "pros", "cons",
+            "sources", "support_sources", "refutation_sources",
+            "used_adversarial_queries",
         ]
         for field in required_fields:
             assert field in data, f"Missing field: {field}"
+
+    def test_sources_breakdown_shape(self, client):
+        """sources field is a breakdown object, not a flat count."""
+        mock_result = AnalysisResult(
+            argument="Coffee reduces liver cancer risk.",
+            argument_en="Coffee reduces liver cancer risk.",
+            estimated_reliability=0.5,
+            reliability_basis="AI estimate based on 2 sources (0 full text, 2 abstract only). Not a verified fact-check.",
+            evidence_balance_ratio=None,
+            evidence_balance_label="Insufficient sources found",
+            pros=[], cons=[],
+            sources=SourceBreakdown(total=2, academic=2, statistical=0, news=0, fact_check=0, full_text=0, abstract_only=2),
+            support_sources=2,
+            refutation_sources=0,
+            used_adversarial_queries=False,
+        )
+
+        with patch("app.api.analyze_argument", new_callable=AsyncMock, return_value=mock_result):
+            response = client.post(
+                "/analyze",
+                headers={"X-API-Key": "test-key-valid"},
+                json={"argument": "Coffee reduces liver cancer risk."}
+            )
+
+        data = response.json()
+        sources = data["sources"]
+        for key in ["total", "academic", "statistical", "news", "fact_check", "full_text", "abstract_only"]:
+            assert key in sources, f"Missing sources breakdown key: {key}"
 
     def test_security_headers_present(self, client):
         response = client.get("/health")
